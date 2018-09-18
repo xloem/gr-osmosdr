@@ -26,6 +26,7 @@ install(FILES
     ranges.h
     time_spec.h
     device.h
+    messages.h
     source.h
     sink.h
     DESTINATION include/osmosdr
