@@ -38,6 +38,7 @@ ENDMACRO(GR_OSMOSDR_APPEND_LIBS)
 GR_OSMOSDR_APPEND_SRCS(
     source_impl.cc
     sink_impl.cc
+    dev_manager.cc
     ranges.cc
     device.cc
     time_spec.cc
