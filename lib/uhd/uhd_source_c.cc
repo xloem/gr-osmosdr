@@ -24,6 +24,8 @@
 
 //#include <uhd/property_tree.hpp>
 
+#include <osmosdr/messages.h>
+
 #include "arg_helpers.h"
 
 #include "uhd_source_c.h"
@@ -125,6 +127,9 @@ uhd_source_c::uhd_source_c(const std::string &args) :
 #endif
   for ( size_t i = 0; i < nchan; i++ )
     connect( _src, i, self(), i );
+  
+  message_port_register_hier_in( osmosdr::CMD_PORT );
+  msg_connect( self(), osmosdr::CMD_PORT, _src, osmosdr::CMD_PORT );
 }
 
 uhd_source_c::~uhd_source_c()
