@@ -27,7 +27,7 @@
 #include <gnuradio/iqbalance/fix_cc.h>
 #endif
 
-#include <source_iface.h>
+#include "dev_manager.h"
 
 #include <map>
 
@@ -92,23 +92,7 @@ public:
   void set_time_unknown_pps(const ::osmosdr::time_spec_t &time_spec);
 
 private:
-  std::vector< source_iface * > _devs;
-
-  /* cache to prevent multiple device calls with the same value coming from grc */
-  double _sample_rate;
-  std::map< size_t, double > _center_freq;
-  std::map< size_t, double > _freq_corr;
-  std::map< size_t, bool > _gain_mode;
-  std::map< size_t, double > _gain;
-  std::map< size_t, double > _if_gain;
-  std::map< size_t, double > _bb_gain;
-  std::map< size_t, std::string > _antenna;
-#ifdef HAVE_IQBALANCE
-  std::vector< gr::iqbalance::fix_cc * > _iq_fix;
-  std::vector< gr::iqbalance::optimize_c * > _iq_opt;
-  std::map< size_t, std::pair<float, float> > _vals;
-#endif
-  std::map< size_t, double > _bandwidth;
+  dev_manager_sptr _manager;
 };
 
 #endif /* INCLUDED_OSMOSDR_SOURCE_IMPL_H */
