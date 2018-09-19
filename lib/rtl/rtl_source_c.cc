@@ -291,6 +291,8 @@ void rtl_source_c::_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 
 void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
 {
+  int buf_tail;
+
   if (_skipped < BUF_SKIP) {
     _skipped++;
     return;
@@ -302,9 +304,14 @@ void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
 
-    int buf_tail = (_buf_head + _buf_used) % _buf_num;
-    memcpy(_buf[buf_tail], buf, len);
-    _samp_avails[buf_tail] = len / BYTES_PER_SAMPLE;
+    buf_tail = (_buf_head + _buf_used) % _buf_num;
+  }
+
+  memcpy(_buf[buf_tail], buf, len);
+  _samp_avails[buf_tail] = len / BYTES_PER_SAMPLE;
+
+  {
+    boost::mutex::scoped_lock lock( _buf_mutex );
 
     if (_buf_used == _buf_num) {
       std::cerr << "OVERFLOW: rtl-sdr stream restarting after draining unread buffers" << std::endl;
