@@ -323,7 +323,11 @@ void rtl_source_c::rtlsdr_wait()
 {
   int ret = rtlsdr_read_async( _dev, _rtlsdr_callback, (void *)this, _buf_num, _buf_len );
 
-  _running = false;
+  {
+    boost::mutex::scoped_lock lock( _buf_mutex );
+
+    _running = false;
+  }
 
   if ( ret != 0 )
     std::cerr << "rtlsdr_read_async returned with " << ret << std::endl;
@@ -347,7 +351,7 @@ int rtl_source_c::work( int noutput_items,
   if (!_running)
     return WORK_DONE;
 
-  while (noutput_items && _buf_used) {
+  while (noutput_items) {
     const int nout = std::min(noutput_items, _samp_avail);
     const unsigned char *buf = _buf[_buf_head] + _buf_offset * 2;
 
@@ -363,6 +367,9 @@ int rtl_source_c::work( int noutput_items,
 
         _buf_head = (_buf_head + 1) % _buf_num;
         _buf_used--;
+
+        if (_buf_used == 0)
+          break;
       }
       _samp_avail = _buf_len / BYTES_PER_SAMPLE;
       _buf_offset = 0;
