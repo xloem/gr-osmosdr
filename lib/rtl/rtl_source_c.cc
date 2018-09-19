@@ -173,8 +173,6 @@ rtl_source_c::rtl_source_c (const std::string &args)
               << std::endl;
   }
 
-  _samp_avail = _buf_len / BYTES_PER_SAMPLE;
-
   // create a lookup table for gr_complex values
   for (unsigned int i = 0; i < 0x100; i++)
     _lut.push_back((i - 127.4f) / 128.0f);
@@ -232,6 +230,7 @@ rtl_source_c::rtl_source_c (const std::string &args)
   set_if_gain( 24 ); /* preset to a reasonable default (non-GRC use case) */
 
   _buf = (unsigned char **)malloc(_buf_num * sizeof(unsigned char *));
+  _samp_avails = (int *)malloc(_buf_num * sizeof(uint32_t));
 
   if (_buf) {
     for(unsigned int i = 0; i < _buf_num; ++i)
@@ -261,6 +260,8 @@ rtl_source_c::~rtl_source_c ()
       free(_buf[i]);
     }
 
+    free(_samp_avails);
+    _samp_avails = NULL;
     free(_buf);
     _buf = NULL;
   }
@@ -302,6 +303,7 @@ void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
 
     int buf_tail = (_buf_head + _buf_used) % _buf_num;
     memcpy(_buf[buf_tail], buf, len);
+    _samp_avails[buf_tail] = len / BYTES_PER_SAMPLE;
 
     if (_buf_used == _buf_num) {
       std::cerr << "O" << std::flush;
@@ -348,23 +350,22 @@ int rtl_source_c::work( int noutput_items,
     return WORK_DONE;
 
   while (noutput_items && _buf_used) {
-    const int nout = std::min(noutput_items, _samp_avail);
+    const int nout = std::min(noutput_items, _samp_avails[_buf_head]);
     const unsigned char *buf = _buf[_buf_head] + _buf_offset * 2;
 
     for (int i = 0; i < nout; ++i)
       *out++ = gr_complex(_lut[buf[i * 2]], _lut[buf[i * 2 + 1]]);
 
     noutput_items -= nout;
-    _samp_avail -= nout;
+    _samp_avails[_buf_head] -= nout;
 
-    if (!_samp_avail) {
+    if (!_samp_avails[_buf_head]) {
       {
         boost::mutex::scoped_lock lock( _buf_mutex );
 
         _buf_head = (_buf_head + 1) % _buf_num;
         _buf_used--;
       }
-      _samp_avail = _buf_len / BYTES_PER_SAMPLE;
       _buf_offset = 0;
     } else {
       _buf_offset += nout;
