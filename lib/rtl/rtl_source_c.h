@@ -127,6 +127,7 @@ private:
   rtlsdr_dev_t *_dev;
   gr::thread::thread _thread;
   unsigned char **_buf;
+  int *_samp_avails;
   unsigned int _buf_num;
   unsigned int _buf_len;
   unsigned int _buf_head;
@@ -138,7 +139,6 @@ private:
   bool _running;
 
   unsigned int _buf_offset;
-  int _samp_avail;
 
   bool _no_tuner;
   bool _auto_gain;
