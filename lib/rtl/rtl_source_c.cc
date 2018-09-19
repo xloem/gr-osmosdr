@@ -340,12 +340,17 @@ int rtl_source_c::work( int noutput_items,
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
 
-    while (_buf_used < 3 && _running) // collect at least 3 buffers
+    while (_buf_used < 3) // collect at least 3 buffers
+    {
+      if (!_running) {
+        // finish when remaining samples are drained
+        if (!_buf_used)
+          return WORK_DONE;
+        break;
+      }
       _buf_cond.wait( lock );
+    }
   }
-
-  if (!_running)
-    return WORK_DONE;
 
   while (noutput_items && _buf_used) {
     const int nout = std::min(noutput_items, _samp_avail);
