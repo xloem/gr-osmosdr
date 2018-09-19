@@ -133,6 +133,8 @@ private:
   unsigned int _buf_used;
   boost::mutex _buf_mutex;
   boost::condition_variable _buf_cond;
+  boost::condition_variable _work_cond;
+  bool _overflow;
   bool _running;
 
   unsigned int _buf_offset;

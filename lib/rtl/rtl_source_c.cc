@@ -48,6 +48,7 @@ using namespace boost::assign;
 #define BUF_LEN  (16 * 32 * 512) /* must be multiple of 512 */
 #define BUF_NUM   15
 #define BUF_SKIP  1 // buffers to skip due to initial garbage
+#define BUF_MIN   3 /* minimum buffers to run work function */
 
 #define BYTES_PER_SAMPLE  2 // rtl device delivers 8 bit unsigned IQ data
 
@@ -87,8 +88,7 @@ rtl_source_c::rtl_source_c (const std::string &args)
     _running(false),
     _no_tuner(false),
     _auto_gain(false),
-    _if_gain(0),
-    _skipped(0)
+    _if_gain(0)
 {
   int ret;
   int index;
@@ -297,6 +297,9 @@ void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
     return;
   }
 
+  if (_overflow)
+    return;
+
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
 
@@ -304,8 +307,9 @@ void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
     memcpy(_buf[buf_tail], buf, len);
 
     if (_buf_used == _buf_num) {
-      std::cerr << "O" << std::flush;
-      _buf_head = (_buf_head + 1) % _buf_num;
+      std::cerr << "OVERFLOW: rtl-sdr stream restarting after draining unread buffers" << std::endl;
+      _overflow = true;
+      rtlsdr_cancel_async( _dev );
     } else {
       _buf_used++;
     }
@@ -321,7 +325,20 @@ void rtl_source_c::_rtlsdr_wait(rtl_source_c *obj)
 
 void rtl_source_c::rtlsdr_wait()
 {
-  int ret = rtlsdr_read_async( _dev, _rtlsdr_callback, (void *)this, _buf_num, _buf_len );
+  int ret;
+
+  do {
+    {
+      boost::mutex::scoped_lock lock( _buf_mutex );
+      // let unread buffers from last run drain
+      while ( _buf_used >= BUF_MIN )
+        _work_cond.wait( lock );
+    }
+
+    _overflow = false;
+    _skipped = 0;
+    ret = rtlsdr_read_async( _dev, _rtlsdr_callback, (void *)this, _buf_num, _buf_len );
+  } while ( _overflow );
 
   _running = false;
 
@@ -340,7 +357,7 @@ int rtl_source_c::work( int noutput_items,
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
 
-    while (_buf_used < 3 && _running) // collect at least 3 buffers
+    while (_buf_used < BUF_MIN && _running) // collect at least BUF_MIN buffers
       _buf_cond.wait( lock );
   }
 
@@ -364,6 +381,9 @@ int rtl_source_c::work( int noutput_items,
         _buf_head = (_buf_head + 1) % _buf_num;
         _buf_used--;
       }
+
+      _work_cond.notify_one();
+
       _samp_avail = _buf_len / BYTES_PER_SAMPLE;
       _buf_offset = 0;
     } else {
