@@ -121,6 +121,7 @@ private:
   void rtlsdr_callback(unsigned char *buf, uint32_t len);
   static void _rtlsdr_wait(rtl_source_c *obj);
   void rtlsdr_wait();
+  void skip_deadline(double secs);
 
   std::vector<float> _lut;
 
@@ -141,7 +142,10 @@ private:
   bool _no_tuner;
   bool _auto_gain;
   double _if_gain;
-  unsigned int _skipped;
+  double _conf_secs;
+  double _boot_secs;
+  double _sample_rate;
+  unsigned int _to_skip;
 };
 
 #endif /* INCLUDED_RTLSDR_SOURCE_C_H */

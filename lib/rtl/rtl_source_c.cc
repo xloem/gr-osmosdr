@@ -47,7 +47,8 @@ using namespace boost::assign;
 
 #define BUF_LEN  (16 * 32 * 512) /* must be multiple of 512 */
 #define BUF_NUM   15
-#define BUF_SKIP  1 // buffers to skip due to initial garbage
+#define CONF_SECS 0   // time reconfigure takes before data is stable
+#define BOOT_SECS 0.5 // time initial boot takes before data is stable
 
 #define BYTES_PER_SAMPLE  2 // rtl device delivers 8 bit unsigned IQ data
 
@@ -88,7 +89,7 @@ rtl_source_c::rtl_source_c (const std::string &args)
     _no_tuner(false),
     _auto_gain(false),
     _if_gain(0),
-    _skipped(0)
+    _to_skip(0)
 {
   int ret;
   int index;
@@ -173,6 +174,25 @@ rtl_source_c::rtl_source_c (const std::string &args)
               << std::endl;
   }
 
+  _conf_secs = _boot_secs = 0;
+
+  if (dict.count("conf_secs"))
+    _conf_secs = boost::lexical_cast< double >( dict["conf_secs"] ) + 0.5;
+
+  if (dict.count("boot_secs"))
+    _boot_secs = boost::lexical_cast< double >( dict["boot_secs"] ) + 0.5;
+
+  if (0 == _conf_secs)
+    _conf_secs = CONF_SECS;
+
+  if (0 == _boot_secs)
+    _boot_secs = BOOT_SECS;
+
+  if ( CONF_SECS != _conf_secs || BOOT_SECS != _boot_secs ) {
+    std::cerr << "Skipping " << _conf_secs << "s each configuration change; "
+      << _boot_secs << "s on initial boot." << std::endl;
+  }
+
   _samp_avail = _buf_len / BYTES_PER_SAMPLE;
 
   // create a lookup table for gr_complex values
@@ -196,7 +216,8 @@ rtl_source_c::rtl_source_c (const std::string &args)
         str(boost::format("Failed to set xtal frequencies. Error %d.") % ret ));
   }
 
-  ret = rtlsdr_set_sample_rate( _dev, 1024000 );
+  _sample_rate = 1024000;
+  ret = rtlsdr_set_sample_rate( _dev, _sample_rate );
   if (ret < 0)
     throw std::runtime_error("Failed to set default samplerate.");
 
@@ -228,6 +249,8 @@ rtl_source_c::rtl_source_c (const std::string &args)
   ret = rtlsdr_reset_buffer( _dev );
   if (ret < 0)
     throw std::runtime_error("Failed to reset usb buffers.");
+
+  skip_deadline( _boot_secs );
 
   set_if_gain( 24 ); /* preset to a reasonable default (non-GRC use case) */
 
@@ -292,13 +315,19 @@ void rtl_source_c::_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 
 void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
 {
-  if (_skipped < BUF_SKIP) {
-    _skipped++;
-    return;
-  }
-
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
+
+    if (_to_skip > len) {
+      _to_skip -= len;
+      return;
+    }
+
+    if (_to_skip > 0) {
+      buf += _to_skip;
+      len -= _to_skip;
+      _to_skip = 0;
+    }
 
     int buf_tail = (_buf_head + _buf_used) % _buf_num;
     memcpy(_buf[buf_tail], buf, len);
@@ -329,6 +358,12 @@ void rtl_source_c::rtlsdr_wait()
     std::cerr << "rtlsdr_read_async returned with " << ret << std::endl;
 
   _buf_cond.notify_one();
+}
+
+void rtl_source_c::skip_deadline( double secs )
+{
+  boost::mutex::scoped_lock lock( _buf_mutex );
+  _to_skip = std::max( _to_skip, (unsigned int)(secs * _sample_rate) );
 }
 
 int rtl_source_c::work( int noutput_items,
@@ -439,10 +474,19 @@ osmosdr::meta_range_t rtl_source_c::get_sample_rates()
 double rtl_source_c::set_sample_rate(double rate)
 {
   if (_dev) {
+    skip_deadline( _conf_secs );
     rtlsdr_set_sample_rate( _dev, (uint32_t)rate );
+
+    {
+      boost::mutex::scoped_lock lock( _buf_mutex );
+
+      double new_sample_rate = get_sample_rate();
+      _to_skip = _to_skip * new_sample_rate / _sample_rate;
+      _sample_rate = new_sample_rate;
+    }
   }
 
-  return get_sample_rate();
+  return _sample_rate;
 }
 
 double rtl_source_c::get_sample_rate()
@@ -489,8 +533,10 @@ osmosdr::freq_range_t rtl_source_c::get_freq_range( size_t chan )
 
 double rtl_source_c::set_center_freq( double freq, size_t chan )
 {
-  if (_dev)
+  if (_dev) {
+    skip_deadline( _conf_secs );
     rtlsdr_set_center_freq( _dev, (uint32_t)freq );
+  }
 
   return get_center_freq( chan );
 }
@@ -505,8 +551,10 @@ double rtl_source_c::get_center_freq( size_t chan )
 
 double rtl_source_c::set_freq_corr( double ppm, size_t chan )
 {
-  if ( _dev )
+  if ( _dev ) {
+    skip_deadline( _conf_secs );
     rtlsdr_set_freq_correction( _dev, (int)ppm );
+  }
 
   return get_freq_corr( chan );
 }
@@ -574,6 +622,7 @@ bool rtl_source_c::set_gain_mode( bool automatic, size_t chan )
       _auto_gain = automatic;
     }
 
+    skip_deadline( _conf_secs );
     rtlsdr_set_agc_mode(_dev, int(automatic));
   }
 
@@ -590,6 +639,7 @@ double rtl_source_c::set_gain( double gain, size_t chan )
   osmosdr::gain_range_t rf_gains = rtl_source_c::get_gain_range( chan );
 
   if (_dev) {
+    skip_deadline( _conf_secs );
     rtlsdr_set_tuner_gain( _dev, int(rf_gains.clip(gain) * 10.0) );
   }
 
@@ -681,6 +731,7 @@ double rtl_source_c::set_if_gain(double gain, size_t chan)
     for (unsigned int stage = 1; stage <= gains.size(); stage++) {
       rtlsdr_set_tuner_if_gain( _dev, stage, int(gains[ stage ] * 10.0));
     }
+    skip_deadline( _conf_secs );
   }
 
   _if_gain = gain;
