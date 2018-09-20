@@ -148,6 +148,8 @@ private:
   unsigned int _buf_offset;
 
   bool _no_tuner;
+  bool _testmode;
+  uint8_t _testval;
   bool _auto_gain;
   double _if_gain;
   unsigned int _skipped;
