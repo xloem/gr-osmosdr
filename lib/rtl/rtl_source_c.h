@@ -139,6 +139,8 @@ private:
   int _samp_avail;
 
   bool _no_tuner;
+  bool _testmode;
+  uint8_t _testval;
   bool _auto_gain;
   double _if_gain;
   unsigned int _skipped;

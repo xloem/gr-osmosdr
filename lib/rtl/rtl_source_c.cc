@@ -86,6 +86,7 @@ rtl_source_c::rtl_source_c (const std::string &args)
     _buf(NULL),
     _running(false),
     _no_tuner(false),
+    _testmode(false),
     _auto_gain(false),
     _if_gain(0),
     _skipped(0)
@@ -156,6 +157,9 @@ rtl_source_c::rtl_source_c (const std::string &args)
 
   _buf_num = _buf_len = _buf_head = _buf_used = _buf_offset = 0;
 
+  if (dict.count("testmode"))
+    _testmode = boost::lexical_cast<bool>( dict["testmode"] );
+
   if (dict.count("buffers"))
     _buf_num = boost::lexical_cast< unsigned int >( dict["buffers"] );
 
@@ -225,6 +229,12 @@ rtl_source_c::rtl_source_c (const std::string &args)
   if (ret < 0)
     throw std::runtime_error("Failed to set bias tee.");
 
+  if (_testmode) {
+    ret = rtlsdr_set_testmode(_dev, _testmode);
+    if (ret < 0)
+      throw std::runtime_error("Failed to set test mode.");
+  }
+
   ret = rtlsdr_reset_buffer( _dev );
   if (ret < 0)
     throw std::runtime_error("Failed to reset usb buffers.");
@@ -293,6 +303,8 @@ void rtl_source_c::_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
 {
   if (_skipped < BUF_SKIP) {
+    if (_testmode)
+      _testval = buf[len - 1];
     _skipped++;
     return;
   }
@@ -351,8 +363,19 @@ int rtl_source_c::work( int noutput_items,
     const int nout = std::min(noutput_items, _samp_avail);
     const unsigned char *buf = _buf[_buf_head] + _buf_offset * 2;
 
-    for (int i = 0; i < nout; ++i)
+    for (int i = 0; i < nout; ++i) {
+      if (_testmode)
+        for (int j = i * 2; j < i * 2 + 2; ++j) {
+          ++_testval;
+          if (buf[j] != _testval) {
+            int dropped = (uint8_t)(buf[j] - _testval);
+            int offset = nitems_written(0) + (out - ((gr_complex *)output_items[0]));
+            std::cerr << "Dropped >=" << dropped << " samples @" << offset << std::endl;
+            _testval = buf[j];
+          }
+        }
       *out++ = gr_complex(_lut[buf[i * 2]], _lut[buf[i * 2 + 1]]);
+    }
 
     noutput_items -= nout;
     _samp_avail -= nout;
