@@ -154,10 +154,13 @@ rtl_source_c::rtl_source_c (const std::string &args)
   if (dict.count("bias"))
     bias_tee = boost::lexical_cast<bool>( dict["bias"] );
 
-  _buf_num = _buf_len = _buf_head = _buf_used = _buf_offset = 0;
+  _buf_num = _buf_num_live = _buf_len = _buf_head = _buf_used = 0;
 
   if (dict.count("buffers"))
     _buf_num = boost::lexical_cast< unsigned int >( dict["buffers"] );
+
+  if (dict.count("buffers_live"))
+    _buf_num_live = boost::lexical_cast< unsigned int >( dict["buffers_live"] );
 
   if (dict.count("buflen"))
     _buf_len = boost::lexical_cast< unsigned int >( dict["buflen"] );
@@ -165,11 +168,15 @@ rtl_source_c::rtl_source_c (const std::string &args)
   if (0 == _buf_num)
     _buf_num = BUF_NUM;
 
+  if (0 == _buf_num_live)
+    _buf_num_live = _buf_num / 2;
+
   if (0 == _buf_len || _buf_len % 512 != 0) /* len must be multiple of 512 */
     _buf_len = BUF_LEN;
 
-  if ( BUF_NUM != _buf_num || BUF_LEN != _buf_len ) {
-    std::cerr << "Using " << _buf_num << " buffers of size " << _buf_len << "."
+  if ( BUF_NUM != _buf_num || BUF_LEN != _buf_len || BUF_NUM / 2 != _buf_num_live ) {
+    std::cerr << "Using " << _buf_num << " buffers of size " << _buf_len
+              << " and ensuring >=" << _buf_num_live << " stay active."
               << std::endl;
   }
 
@@ -229,13 +236,8 @@ rtl_source_c::rtl_source_c (const std::string &args)
 
   set_if_gain( 24 ); /* preset to a reasonable default (non-GRC use case) */
 
-  _buf = (unsigned char **)malloc(_buf_num * sizeof(unsigned char *));
-  _samp_avails = (int *)malloc(_buf_num * sizeof(uint32_t));
-
-  if (_buf) {
-    for(unsigned int i = 0; i < _buf_num; ++i)
-      _buf[i] = (unsigned char *)malloc(_buf_len);
-  }
+  _buf_num -= _buf_num_live;
+  _buf = (_buf_t *)malloc(_buf_num * sizeof(_buf_t));
 }
 
 /*
@@ -256,10 +258,6 @@ rtl_source_c::~rtl_source_c ()
   }
 
   if (_buf) {
-    for(unsigned int i = 0; i < _buf_num; ++i) {
-      free(_buf[i]);
-    }
-
     free(_buf);
     _buf = NULL;
   }
@@ -283,18 +281,17 @@ bool rtl_source_c::stop()
   return true;
 }
 
-void rtl_source_c::_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
+void rtl_source_c::_rtlsdr_callback(rtlsdr_buf_t release_hdl, unsigned char *buf, uint32_t len, void *ctx)
 {
   rtl_source_c *obj = (rtl_source_c *)ctx;
-  obj->rtlsdr_callback(buf, len);
+  obj->rtlsdr_callback(release_hdl, buf, len);
 }
 
-void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
+void rtl_source_c::rtlsdr_callback(rtlsdr_buf_t release_hdl, unsigned char *buf, uint32_t len)
 {
-  int buf_tail;
-
   if (_skipped < BUF_SKIP) {
     _skipped++;
+    rtlsdr_async_ex_release( _dev, release_hdl );
     return;
   }
 
@@ -304,22 +301,22 @@ void rtl_source_c::rtlsdr_callback(unsigned char *buf, uint32_t len)
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
 
-    buf_tail = (_buf_head + _buf_used) % _buf_num;
-  }
-
-  memcpy(_buf[buf_tail], buf, len);
-  _samp_avails[buf_tail] = len / BYTES_PER_SAMPLE;
-
-  {
-    boost::mutex::scoped_lock lock( _buf_mutex );
-
     if (_buf_used == _buf_num) {
       std::cerr << "OVERFLOW: rtl-sdr stream restarting after draining unread buffers" << std::endl;
       _overflow = true;
+
+      // let unread buffers drain before allowing rtlsdr to deallocate them
+      while (_buf_used)
+        _work_cond.wait( lock );
+
       rtlsdr_cancel_async( _dev );
-    } else {
-      _buf_used++;
+
+      return;
     }
+
+    int buf_tail = (_buf_head + _buf_used) % _buf_num;
+    _buf[buf_tail] = { release_hdl, buf, int(len / BYTES_PER_SAMPLE) };
+    _buf_used++;
   }
 
   _buf_cond.notify_one();
@@ -337,14 +334,13 @@ void rtl_source_c::rtlsdr_wait()
   do {
     {
       boost::mutex::scoped_lock lock( _buf_mutex );
-      // let unread buffers from last run drain
-      while ( _buf_used >= BUF_MIN )
-        _work_cond.wait( lock );
-    }
 
-    _overflow = false;
+      _overflow = false;
+    }
     _skipped = 0;
-    ret = rtlsdr_read_async( _dev, _rtlsdr_callback, (void *)this, _buf_num, _buf_len );
+
+    ret = rtlsdr_read_async_ex( _dev, _rtlsdr_callback, (void *)this, _buf_num + _buf_num_live, _buf_len );
+
   } while ( _overflow );
 
   {
@@ -354,7 +350,7 @@ void rtl_source_c::rtlsdr_wait()
   }
 
   if ( ret != 0 )
-    std::cerr << "rtlsdr_read_async returned with " << ret << std::endl;
+    std::cerr << "rtlsdr_read_async_ex returned with " << ret << std::endl;
 
   _buf_cond.notify_one();
 }
@@ -367,8 +363,8 @@ int rtl_source_c::work( int noutput_items,
 
   {
     boost::mutex::scoped_lock lock( _buf_mutex );
-
-    while (_buf_used < BUF_MIN) // collect at least BUF_MIN buffers
+    // collect at least BUF_MIN buffers unless draining an overflow
+    while (_buf_used < BUF_MIN && (!_overflow || !_buf_used))
     {
       if (!_running) {
         // finish when remaining samples are drained
@@ -381,16 +377,19 @@ int rtl_source_c::work( int noutput_items,
   }
 
   while (noutput_items) {
-    const int nout = std::min(noutput_items, _samp_avails[_buf_head]);
-    const unsigned char *buf = _buf[_buf_head] + _buf_offset * 2;
+    const int nout = std::min(noutput_items, _buf[_buf_head].samp_avail);
+    const unsigned char *buf = _buf[_buf_head].buf;
 
     for (int i = 0; i < nout; ++i)
       *out++ = gr_complex(_lut[buf[i * 2]], _lut[buf[i * 2 + 1]]);
 
     noutput_items -= nout;
-    _samp_avails[_buf_head] -= nout;
+    _buf[_buf_head].samp_avail -= nout;
 
-    if (!_samp_avails[_buf_head]) {
+    if (!_buf[_buf_head].samp_avail) {
+      rtlsdr_async_ex_release( _dev, _buf[_buf_head].release_hdl );
+      _buf[_buf_head].buf = NULL;
+
       {
         boost::mutex::scoped_lock lock( _buf_mutex );
 
@@ -398,14 +397,14 @@ int rtl_source_c::work( int noutput_items,
         _buf_used--;
 
         if (_buf_used == 0)
-          break;
+          // must terminate when no buffers left
+          // but still need to notify rtl thread
+          noutput_items = 0;
       }
 
       _work_cond.notify_one();
-
-      _buf_offset = 0;
     } else {
-      _buf_offset += nout;
+      _buf[_buf_head].buf += nout * 2;
     }
   }
 

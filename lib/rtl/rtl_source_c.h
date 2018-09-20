@@ -32,6 +32,7 @@
 
 class rtl_source_c;
 typedef struct rtlsdr_dev rtlsdr_dev_t;
+typedef struct libusb_transfer * rtlsdr_buf_t;
 
 /*
  * We use boost::shared_ptr's instead of raw pointers for all access
@@ -117,8 +118,8 @@ protected:
   bool stop();
 
 private:
-  static void _rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx);
-  void rtlsdr_callback(unsigned char *buf, uint32_t len);
+  static void _rtlsdr_callback(rtlsdr_buf_t release_hdl, unsigned char *buf, uint32_t len, void *ctx);
+  void rtlsdr_callback(rtlsdr_buf_t release_hdl, unsigned char *buf, uint32_t len);
   static void _rtlsdr_wait(rtl_source_c *obj);
   void rtlsdr_wait();
 
@@ -126,9 +127,15 @@ private:
 
   rtlsdr_dev_t *_dev;
   gr::thread::thread _thread;
-  unsigned char **_buf;
+  struct _buf_t {
+    rtlsdr_buf_t release_hdl;
+    unsigned char * buf;
+    int samp_avail;
+  };
+  _buf_t *_buf;
   int *_samp_avails;
   unsigned int _buf_num;
+  unsigned int _buf_num_live;
   unsigned int _buf_len;
   unsigned int _buf_head;
   unsigned int _buf_used;
